@@ -1,0 +1,70 @@
+name: Server archive
+
+# Builds the Linux server archive and the R1 voice bundle from the private source at `ref` and publishes them as
+# prerelease server-<version> (never Latest, so it cannot shadow the desktop feed). Build steps print pass or fail only.
+on:
+  workflow_dispatch:
+    inputs:
+      version: { description: "e.g. 0.1.5-tessaya.214", required: true, type: string }
+      ref: { description: "Source commit to build", required: true, type: string }
+
+permissions:
+  contents: write
+
+concurrency:
+  group: server-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+    working-directory: src
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ inputs.version }}
+      Q: bash ../.github/quiet.sh
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check version
+        working-directory: .
+        run: '[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(tessaya|baton)\.[0-9]+$ ]] || { echo "bad version"; exit 1; }'
+      - uses: actions/checkout@v6
+        with: { persist-credentials: false, sparse-checkout: .github }
+      - uses: actions/checkout@v6
+        with:
+          repository: RabHanz/tessaya
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: src
+      - uses: actions/setup-node@v4
+        with: { node-version-file: src/package.json }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: $Q install bash -c 'corepack enable && pnpm install --frozen-lockfile'
+      - name: Resource monitor and recogniser
+        env:
+          TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON
+        run: |
+          $Q "resource monitor" cargo build --release --manifest-path native/resource-monitor/Cargo.toml
+          mkdir -p "$RUNNER_TEMP/resource-monitor/linux-x64"
+          cp native/resource-monitor/target/release/t3-resource-monitor "$RUNNER_TEMP/resource-monitor/linux-x64/"
+          echo "BATON_RESOURCE_MONITOR_DIR=$RUNNER_TEMP/resource-monitor" >> "$GITHUB_ENV"
+          $Q recogniser cargo build --release --locked --manifest-path native/tessaya-recognizer/Cargo.toml
+          echo "BATON_R1_RECOGNIZER=$PWD/native/tessaya-recognizer/target/release/tessaya-recognizer" >> "$GITHUB_ENV"
+      - name: Build and smoke-test
+        run: NODE_ENV=production $Q "build and smoke" bash scripts/tessaya/release-build.sh "$VERSION"
+      - name: Publish
+        run: |
+          cd release-cli
+          sha256sum "t3-$VERSION-linux-x64.tar.gz" > "t3-$VERSION-linux-x64.tar.gz.sha256"
+          $Q "nothing private in the text files" node ../scripts/tessaya/guard-private.mjs --files *.sha256
+          gh release create "server-$VERSION" -R "$GITHUB_REPOSITORY" --target main --prerelease --latest=false \
+            "t3-$VERSION-linux-x64.tar.gz" "t3-$VERSION-linux-x64.tar.gz.sha256" \
+            "r1-voice-$VERSION-linux-x64.tar.gz" "r1-voice-$VERSION-linux-x64.tar.gz.sha256" \
+            --title "Server $VERSION" \
+            --notes "Linux server archive. Source ${{ inputs.ref }}. The r1-voice bundle and the models it fetches include Parakeet TDT 0.6B v3 by NVIDIA (CC BY 4.0), Pocket TTS by Kyutai (CC BY 4.0) and Smart Turn by Daily (BSD-2-Clause)." > /dev/null
+          echo published

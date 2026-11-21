@@ -1,0 +1,78 @@
+name: tessel-flash release
+
+# Builds the tessel-flash cable/OTA tool from the private source at `ref` and publishes it as tag `tag`
+# (tessel-flash-vX.Y.Z), with SHA256SUMS signed by the release key.
+on:
+  workflow_dispatch:
+    inputs:
+      tag: { description: "tessel-flash-vX.Y.Z", required: true, type: string }
+      ref: { description: "Source commit to build", required: true, type: string }
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, goos: linux, goarch: amd64, cgo: "0" }
+          - { os: ubuntu-latest, goos: linux, goarch: arm64, cgo: "0" }
+          - { os: ubuntu-latest, goos: windows, goarch: amd64, cgo: "0", ext: .exe }
+          - { os: macos-latest, goos: darwin, goarch: arm64, cgo: "1" }
+          - { os: macos-latest, goos: darwin, goarch: amd64, cgo: "1", cflags: "-arch x86_64" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - run: '[[ "${{ inputs.tag }}" =~ ^tessel-flash-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag"; exit 1; }'
+      - uses: actions/checkout@v6
+        with:
+          repository: RabHanz/tessaya
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: tools/tessel-flash
+      - uses: actions/setup-go@v5
+        with: { go-version-file: tools/tessel-flash/go.mod, cache: false }
+      - name: Build
+        working-directory: tools/tessel-flash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+          CGO_CFLAGS: ${{ matrix.cflags }}
+          CGO_LDFLAGS: ${{ matrix.cflags }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          go build -trimpath -ldflags "-s -w -X github.com/RabHanz/tessaya/tools/tessel-flash/cli.Version=${TAG#tessel-flash-v}" \
+            -o "dist/tessel-flash-${GOOS}-${GOARCH}${{ matrix.ext }}" . > /dev/null 2>&1 && echo pass
+      - uses: actions/upload-artifact@v4
+        with: { name: "flash-${{ matrix.goos }}-${{ matrix.goarch }}", path: tools/tessel-flash/dist/*, retention-days: 1 }
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: RabHanz/tessaya
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: tools/tessel-flash
+      - uses: actions/download-artifact@v4
+        with: { path: tools/tessel-flash/dist, merge-multiple: true }
+      - name: Sign and publish
+        env:
+          R1_OTA_SIGNING_KEY: ${{ secrets.R1_OTA_SIGNING_KEY }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          (cd tools/tessel-flash/dist && sha256sum *-linux-* *-windows-* *-darwin-* > SHA256SUMS)
+          node tools/tessel-flash/sign.mjs tools/tessel-flash/dist/SHA256SUMS > /dev/null
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target main --latest=false tools/tessel-flash/dist/* \
+            --title "tessel-flash ${TAG#tessel-flash-v}" --notes-file tools/tessel-flash/README.md > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id' | xargs -r -I{} gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/{}"
+          echo published

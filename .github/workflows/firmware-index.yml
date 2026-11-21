@@ -1,0 +1,53 @@
+name: Firmware release list
+
+# Rebuilds the signed list of every r1-firmware-smp-* release here and publishes it on r1-firmware-index, where
+# servers, r1flash and tessel-flash read it. Every image is downloaded and its signature checked before it is listed.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref: { description: "Source commit whose r1Firmware.ts pins the recommended version", required: true, type: string, default: main }
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-index
+  cancel-in-progress: false
+
+jobs:
+  index:
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'r1-firmware-smp-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: RabHanz/tessaya
+          ref: ${{ inputs.ref || 'main' }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/tessaya
+            packages/tessaya-shared/src
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build and sign the list
+        env:
+          R1_OTA_SIGNING_KEY: ${{ secrets.R1_OTA_SIGNING_KEY }}
+        run: |
+          gh release list --repo "$REPO" --limit 300 --json tagName,publishedAt > "$RUNNER_TEMP/releases.json"
+          node scripts/tessaya/r1-release-index.mjs "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/out"
+          test -s "$RUNNER_TEMP/out/r1-releases.json.sig"
+          node scripts/tessaya/guard-private.mjs --files "$RUNNER_TEMP/out/r1-releases.json"
+      - name: Publish on r1-firmware-index
+        run: |
+          gh release view r1-firmware-index --repo "$REPO" >/dev/null 2>&1 ||
+            gh release create r1-firmware-index --repo "$REPO" --target main --prerelease --latest=false \
+              --title "R1 firmware release list (signed)" --notes "The signed list of every R1 firmware release."
+          gh release upload r1-firmware-index --repo "$REPO" --clobber "$RUNNER_TEMP/out/r1-releases.json" "$RUNNER_TEMP/out/r1-releases.json.sig"
