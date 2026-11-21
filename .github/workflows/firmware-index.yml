@@ -16,6 +16,10 @@ concurrency:
   group: firmware-index
   cancel-in-progress: false
 
+defaults:
+  run:
+    working-directory: src
+
 jobs:
   index:
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'r1-firmware-smp-')
@@ -26,15 +30,11 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          repository: RabHanz/tessaya
-          ref: ${{ inputs.ref || 'main' }}
-          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/tessaya
-            packages/tessaya-shared/src
-          sparse-checkout-cone-mode: false
+        with: { persist-credentials: false, sparse-checkout: .github }
+      - name: Source
+        working-directory: .
+        env: { KEY: "${{ secrets.SOURCE_DEPLOY_KEY }}" }
+        run: bash .github/source.sh "${{ inputs.ref || 'main' }}" scripts/tessaya packages/tessaya-shared/src
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
       - name: Build and sign the list
