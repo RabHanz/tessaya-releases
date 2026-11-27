@@ -33,7 +33,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: ubuntu-latest, name: linux }
+          # glibc 2.39: the build refuses native modules that need newer (ubuntu-latest's node-pty needs 2.42).
+          - { os: ubuntu-24.04, name: linux }
           - { os: windows-latest, name: windows }
           - { os: macos-latest, name: macos }
     name: Build ${{ matrix.name }}
